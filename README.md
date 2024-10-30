@@ -16,6 +16,7 @@ Registro de Usuario: Captura y almacena la codificación facial del usuario medi
 Inicio de Sesión: Verifica la identidad del usuario comparando la captura facial actual con la almacenada durante el registro.
 
 Detección de Emociones con DeepFace:
+
 Captura de Emoción: Antes de realizar acciones sensibles (como encriptar/desencriptar o guardar notas), la aplicación captura la emoción facial del usuario.
 Consistencia de Emoción: Requiere que la misma emoción se detecte de manera consistente durante varios segundos para proceder, evitando detecciones erróneas.
 
