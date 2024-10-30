@@ -2,6 +2,8 @@ CyberMoodSec by ViajaTech ¡Encripta tus Archivos con Tus Emociones Faciales!
 -------
 ![](https://github.com/viajatech/CyberMoodSec/blob/main/CyberMoodSec%20GUI%20%20.png)
 -------
+"¡Descubre CyberMoodSec, la innovadora herramienta que utiliza la detección de emociones y reconocimiento facial para encriptar y desencriptar tus archivos de forma única y segura! Protege tus datos personales con solo una mirada y una emoción. ¡La seguridad digital nunca fue tan personal y emocionante!"
+-------
 ![](https://github.com/viajatech/CyberMoodSec/blob/main/CyberMoodSec%20Main.png)
 -------
 A continuación se detallan sus principales características y funcionalidades:
