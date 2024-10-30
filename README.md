@@ -1,4 +1,4 @@
-CyberMoodSec by ViajaTech es una aplicación de escritorio desarrollada en Python que combina interfaces gráficas de usuario (GUI) con funcionalidades avanzadas de seguridad basadas en la detección de emociones faciales.
+CyberMoodSec by ViajaTech ¡Encripta tus Archivos con Tus Emociones Faciales!
 -------
 ![](https://github.com/viajatech/CyberMoodSec/blob/main/CyberMoodSec%20GUI%20%20.png)
 -------
