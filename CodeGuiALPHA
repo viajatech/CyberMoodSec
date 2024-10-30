@@ -1,0 +1,876 @@
+#CyberMoodSec by ViajaTech es una aplicación de escritorio desarrollada en Python que combina interfaces gráficas de usuario (GUI) con funcionalidades avanzadas de seguridad basadas en la detección de emociones faciales.
+#by David Ruiz (@viajatech)
+
+#Dale like al repo si lo utilizas, gracias! 
+
+
+#Recuerda instalar estas dependencias antes de correr el script;
+#pip install opencv-python numpy scikit-learn pillow deepface cryptography
+
+
+import tkinter as tk
+from tkinter import ttk, messagebox, scrolledtext, filedialog, simpledialog
+import cv2
+import os
+import numpy as np
+import pickle
+from sklearn.metrics.pairwise import cosine_similarity
+from PIL import Image, ImageTk
+from threading import Thread
+import time
+import logging
+from deepface import DeepFace
+from cryptography.hazmat.primitives import hashes, padding
+from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
+from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+from cryptography.hazmat.backends import default_backend
+import base64
+import sqlite3
+
+# ============================== Configuración de Logging ==============================
+
+def setup_logging():
+    logger = logging.getLogger("CyberMoodSecLogger")
+    logger.setLevel(logging.DEBUG)
+
+    # Crear archivo de log
+    fh = logging.FileHandler("cybermoodsec.log")
+    fh.setLevel(logging.DEBUG)
+
+    # Formato de log
+    formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
+    fh.setFormatter(formatter)
+
+    logger.addHandler(fh)
+
+    return logger
+
+# ============================== Funciones de Encriptación ==============================
+
+def derive_key(emotion, salt=b'static_salt'):
+    """
+    Deriva una clave AES de 256 bits a partir de una emoción usando PBKDF2HMAC.
+    """
+    kdf = PBKDF2HMAC(
+        algorithm=hashes.SHA256(),
+        length=32,
+        salt=salt,
+        iterations=100000,
+        backend=default_backend()
+    )
+    # Convertir la emoción a bytes
+    emotion_bytes = emotion.encode()
+    key = kdf.derive(emotion_bytes)
+    return key
+
+def encrypt_file(file_path, key):
+    """
+    Encripta un archivo usando AES-256 en modo CBC.
+    """
+    try:
+        backend = default_backend()
+        iv = os.urandom(16)
+        cipher = Cipher(algorithms.AES(key), modes.CBC(iv), backend=backend)
+        encryptor = cipher.encryptor()
+        padder = padding.PKCS7(128).padder()
+
+        with open(file_path, 'rb') as f:
+            data = f.read()
+
+        padded_data = padder.update(data) + padder.finalize()
+        encrypted = encryptor.update(padded_data) + encryptor.finalize()
+
+        with open(file_path + ".enc", 'wb') as f:
+            f.write(iv + encrypted)
+
+        # Opcional: eliminar el archivo original
+        os.remove(file_path)
+
+        return True
+    except Exception as e:
+        return False
+
+def decrypt_file(encrypted_path, key):
+    """
+    Desencripta un archivo usando AES-256 en modo CBC.
+    """
+    try:
+        backend = default_backend()
+        with open(encrypted_path, 'rb') as f:
+            iv = f.read(16)
+            encrypted = f.read()
+
+        cipher = Cipher(algorithms.AES(key), modes.CBC(iv), backend=backend)
+        decryptor = cipher.decryptor()
+        decrypted_padded = decryptor.update(encrypted) + decryptor.finalize()
+
+        unpadder = padding.PKCS7(128).unpadder()
+        decrypted = unpadder.update(decrypted_padded) + unpadder.finalize()
+
+        original_path = encrypted_path[:-4]  # Remover ".enc"
+        with open(original_path, 'wb') as f:
+            f.write(decrypted)
+
+        # Opcional: eliminar el archivo encriptado
+        os.remove(encrypted_path)
+
+        return True
+    except Exception as e:
+        return False
+
+def encrypt_content(content, key):
+    """
+    Encripta contenido de texto usando AES-256 en modo CBC.
+    """
+    try:
+        backend = default_backend()
+        iv = os.urandom(16)
+        cipher = Cipher(algorithms.AES(key), modes.CBC(iv), backend=backend)
+        encryptor = cipher.encryptor()
+        padder = padding.PKCS7(128).padder()
+
+        padded_data = padder.update(content.encode()) + padder.finalize()
+        encrypted = encryptor.update(padded_data) + encryptor.finalize()
+
+        # Codificar en base64 para almacenar en la base de datos
+        encrypted_b64 = base64.b64encode(iv + encrypted).decode()
+
+        return encrypted_b64
+    except Exception as e:
+        return None
+
+def decrypt_content(encrypted_b64, key):
+    """
+    Desencripta contenido de texto usando AES-256 en modo CBC.
+    """
+    try:
+        backend = default_backend()
+        encrypted_data = base64.b64decode(encrypted_b64)
+        iv = encrypted_data[:16]
+        encrypted = encrypted_data[16:]
+
+        cipher = Cipher(algorithms.AES(key), modes.CBC(iv), backend=backend)
+        decryptor = cipher.decryptor()
+        decrypted_padded = decryptor.update(encrypted) + decryptor.finalize()
+
+        unpadder = padding.PKCS7(128).unpadder()
+        decrypted = unpadder.update(decrypted_padded) + unpadder.finalize()
+
+        return decrypted.decode()
+    except Exception as e:
+        return None
+
+# ============================== Manejador de Logs Personalizado ==============================
+
+class LogHandler(logging.Handler):
+    def __init__(self, text_widget):
+        super().__init__()
+        self.text_widget = text_widget
+
+    def emit(self, record):
+        msg = self.format(record)
+        def append():
+            self.text_widget.config(state='normal')
+            self.text_widget.insert(tk.END, msg + '\n')
+            self.text_widget.see(tk.END)
+            self.text_widget.config(state='disabled')
+        self.text_widget.after(0, append)
+
+# ============================== Clase de la Aplicación ==============================
+
+class CyberMoodSecApp:
+    def __init__(self, master):
+        self.master = master
+        master.title("CyberMoodSec by ViajaTech")
+        master.geometry("800x600")
+        master.configure(bg='#1e1e2e')
+
+        # Inicializar variables
+        self.logged_in = False
+        self.stop_threads = False
+        self.current_emotion = "neutral"
+        self.last_emotion = None
+        self.username = ""
+
+        # Configurar logging
+        self.logger = setup_logging()
+
+        # Implementar ventana de logs
+        self.setup_log_window()
+
+        # Aplicar estilos personalizados
+        style = ttk.Style()
+        style.theme_use('clam')
+        style.configure('TFrame', background='#1e1e2e')
+        style.configure('TLabel', background='#1e1e2e', foreground='#00ffaa', font=("Helvetica", 12))
+        style.configure('TEntry', fieldbackground='#313244', foreground='#00ffaa', font=("Helvetica", 12))
+        style.configure('TButton', background='#00ffaa', foreground='#000000', font=("Helvetica", 12))
+        style.configure('TProgressbar', troughcolor='#1e1e2e', background='#00ffaa')
+
+        # Main Frame
+        self.frame = tk.Frame(master, bg='#1e1e2e')
+        self.frame.pack(fill=tk.BOTH, expand=True, padx=20, pady=20)
+
+        self.welcome_label = ttk.Label(self.frame, text="Bienvenido a CyberMoodSec by ViajaTech", font=("Helvetica", 16))
+        self.welcome_label.pack(pady=10)
+
+        self.login_button = ttk.Button(self.frame, text="Iniciar Sesión", command=self.open_login_window)
+        self.login_button.pack(pady=10)
+
+        self.register_button = ttk.Button(self.frame, text="Registrarse", command=self.open_register_window)
+        self.register_button.pack(pady=10)
+
+        # Botón para abrir la ventana de logs
+        self.log_button = ttk.Button(self.frame, text="Ver Logs", command=self.show_log_window)
+        self.log_button.pack(pady=10)
+
+    def setup_log_window(self):
+        # Crear ventana de logs pero no mostrarla hasta que se presione el botón
+        self.log_window = tk.Toplevel(self.master)
+        self.log_window.title("Logs")
+        self.log_window.geometry("600x400")
+        self.log_window.configure(bg='#1e1e2e')
+        self.log_window.withdraw()  # Ocultar inicialmente
+
+        log_frame = tk.Frame(self.log_window, bg='#1e1e2e')
+        log_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+
+        self.log_text = scrolledtext.ScrolledText(log_frame, state='disabled', bg='#313244', fg='#ffffff', font=("Consolas", 10))
+        self.log_text.pack(fill=tk.BOTH, expand=True)
+
+        # Configurar handler para mostrar logs en la ventana
+        log_handler = LogHandler(self.log_text)
+        log_handler.setLevel(logging.DEBUG)
+        formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
+        log_handler.setFormatter(formatter)
+        self.logger.addHandler(log_handler)
+
+    def show_log_window(self):
+        self.log_window.deiconify()
+        self.log_window.lift()
+
+    def open_login_window(self):
+        login_window = tk.Toplevel(self.master)
+        login_window.title("Iniciar Sesión")
+        login_window.geometry("400x300")
+        login_window.configure(bg='#1e1e2e')
+
+        login_frame = tk.Frame(login_window, bg='#1e1e2e')
+        login_frame.pack(fill=tk.BOTH, expand=True, padx=20, pady=20)
+
+        login_label = ttk.Label(login_frame, text="Iniciar Sesión", font=("Helvetica", 14))
+        login_label.pack(pady=10)
+
+        username_label = ttk.Label(login_frame, text="Nombre de Usuario:")
+        username_label.pack(pady=5)
+
+        username_entry = ttk.Entry(login_frame, width=30)
+        username_entry.pack(pady=5)
+
+        verify_button = ttk.Button(login_frame, text="Verificar", command=lambda: self.login(username_entry.get(), login_window))
+        verify_button.pack(pady=20)
+
+    def open_register_window(self):
+        register_window = tk.Toplevel(self.master)
+        register_window.title("Registrarse")
+        register_window.geometry("500x400")
+        register_window.configure(bg='#1e1e2e')
+
+        register_frame = tk.Frame(register_window, bg='#1e1e2e')
+        register_frame.pack(fill=tk.BOTH, expand=True, padx=20, pady=20)
+
+        register_label = ttk.Label(register_frame, text="Registrarse", font=("Helvetica", 14))
+        register_label.pack(pady=10)
+
+        username_label = ttk.Label(register_frame, text="Nombre de Usuario:")
+        username_label.pack(pady=5)
+
+        username_entry = ttk.Entry(register_frame, width=30)
+        username_entry.pack(pady=5)
+
+        capture_button = ttk.Button(register_frame, text="Capturar y Registrar", command=lambda: self.register(username_entry.get(), register_window))
+        capture_button.pack(pady=20)
+
+    def initialize_camera(self):
+        # Abrir la cámara localmente y devolver el objeto de captura
+        if os.name == 'nt':
+            cap = cv2.VideoCapture(0, cv2.CAP_DSHOW)
+        else:
+            cap = cv2.VideoCapture(0)
+
+        if not cap.isOpened():
+            self.logger.error("No se pudo acceder a la cámara. Asegúrate de que esté conectada y no esté siendo utilizada por otra aplicación.")
+            messagebox.showerror("Error", "No se pudo acceder a la cámara. Asegúrate de que esté conectada y no esté siendo utilizada por otra aplicación.")
+            return None
+        self.logger.info("Cámara iniciada correctamente.")
+        return cap
+
+    def register(self, username, window):
+        if not username:
+            messagebox.showerror("Error", "Por favor, ingrese un nombre de usuario.")
+            return
+
+        if os.path.exists(f'faces/{username}.pkl'):
+            messagebox.showerror("Error", "Este usuario ya está registrado.")
+            return
+
+        # Abrir la cámara para registro
+        cap = self.initialize_camera()
+        if cap is None:
+            return
+
+        # Iniciar el registro en un hilo separado
+        Thread(target=self.capture_and_save_face, args=(username, window, cap), daemon=True).start()
+
+    def capture_and_save_face(self, username, window, cap):
+        face_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_frontalface_default.xml')
+
+        if face_cascade.empty():
+            self.logger.error("No se pudo cargar el clasificador de cascada facial.")
+            messagebox.showerror("Error", "No se pudo cargar el clasificador de cascada facial.")
+            cap.release()
+            return
+
+        # Crear una ventana de previsualización
+        preview_window = tk.Toplevel(self.master)
+        preview_window.title("Captura Facial")
+        preview_window.geometry("600x500")
+        preview_window.configure(bg='#1e1e2e')
+
+        # Etiqueta para mostrar la transmisión de video
+        video_label = tk.Label(preview_window, bg='#1e1e2e')
+        video_label.pack(padx=10, pady=10)
+
+        # Etiqueta para el estado
+        status_label = ttk.Label(preview_window, text="Detectando rostro...", font=("Helvetica", 14), foreground='#00ffaa', background='#1e1e2e')
+        status_label.pack(pady=10)
+
+        def update_frame():
+            ret, frame = cap.read()
+            if ret:
+                # Convertir el color para tkinter
+                cv2image = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                img = Image.fromarray(cv2image)
+                imgtk = ImageTk.PhotoImage(image=img)
+                video_label.imgtk = imgtk
+                video_label.configure(image=imgtk)
+
+                # Detectar rostro
+                gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+                faces = face_cascade.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=5, minSize=(100, 100))
+
+                if len(faces) > 0:
+                    x, y, w, h = faces[0]
+                    face = gray[y:y+h, x:x+w]
+                    face_resized = cv2.resize(face, (100, 100))
+
+                    # Guardar la codificación facial
+                    face_encoding = face_resized.flatten().astype(np.float64)
+                    norm = np.linalg.norm(face_encoding)
+                    if norm == 0:
+                        self.logger.error("Norma del encoding de la cara es cero.")
+                        messagebox.showerror("Error", "Error en el procesamiento de la cara. Por favor, inténtelo de nuevo.")
+                        preview_window.destroy()
+                        cap.release()
+                        return
+                    face_encoding /= norm
+
+                    # Guardar la codificación en un archivo pickle
+                    with open(f'faces/{username}.pkl', 'wb') as f:
+                        pickle.dump(face_encoding, f)
+
+                    # Informar al usuario
+                    status_label.config(text="Rostro capturado exitosamente.")
+                    self.logger.info(f"Usuario '{username}' registrado correctamente.")
+                    messagebox.showinfo("Éxito", f"Usuario '{username}' registrado correctamente.")
+                    preview_window.destroy()
+                    window.destroy()
+                    cap.release()
+                else:
+                    status_label.config(text="No se detectó un rostro. Inténtelo de nuevo.")
+
+                if not self.stop_threads:
+                    preview_window.after(100, update_frame)
+            else:
+                status_label.config(text="Error al acceder a la cámara.")
+                self.logger.error("Error al capturar el frame de la cámara.")
+                preview_window.destroy()
+                cap.release()
+
+        update_frame()
+
+    def login(self, username, window):
+        if not username:
+            messagebox.showerror("Error", "Por favor, ingrese un nombre de usuario.")
+            return
+
+        if not os.path.exists(f'faces/{username}.pkl'):
+            messagebox.showerror("Error", "Usuario no registrado. Por favor, regístrese primero.")
+            return
+
+        # Abrir la cámara para verificación
+        cap = self.initialize_camera()
+        if cap is None:
+            return
+
+        # Iniciar la verificación en un hilo separado
+        Thread(target=self.verify_face, args=(username, window, cap), daemon=True).start()
+
+    def verify_face(self, username, window, cap):
+        try:
+            with open(f'faces/{username}.pkl', 'rb') as f:
+                saved_encoding = pickle.load(f)
+        except Exception as e:
+            self.logger.error(f"Error al cargar la codificación facial del usuario '{username}': {e}")
+            messagebox.showerror("Error", "Error al cargar los datos del usuario.")
+            cap.release()
+            return
+
+        face_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_frontalface_default.xml')
+
+        if face_cascade.empty():
+            self.logger.error("No se pudo cargar el clasificador de cascada facial durante la verificación.")
+            messagebox.showerror("Error", "No se pudo cargar el clasificador de cascada facial.")
+            cap.release()
+            return
+
+        # Crear una ventana de verificación
+        verification_window = tk.Toplevel(self.master)
+        verification_window.title("Verificación Facial")
+        verification_window.geometry("600x500")
+        verification_window.configure(bg='#1e1e2e')
+
+        # Etiqueta para mostrar la transmisión de video
+        video_label = tk.Label(verification_window, bg='#1e1e2e')
+        video_label.pack(padx=10, pady=10)
+
+        # Etiqueta para el estado
+        status_label = ttk.Label(verification_window, text="Verificando rostro...", font=("Helvetica", 14), foreground='#00ffaa', background='#1e1e2e')
+        status_label.pack(pady=10)
+
+        def update_verification_frame():
+            ret, frame = cap.read()
+            if ret:
+                # Convertir el color para tkinter
+                cv2image = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                img = Image.fromarray(cv2image)
+                imgtk = ImageTk.PhotoImage(image=img)
+                video_label.imgtk = imgtk
+                video_label.configure(image=imgtk)
+
+                # Detectar rostro
+                gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+                faces = face_cascade.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=5, minSize=(100, 100))
+
+                if len(faces) > 0:
+                    x, y, w, h = faces[0]
+                    face = gray[y:y+h, x:x+w]
+                    face_resized = cv2.resize(face, (100, 100))
+
+                    # Codificar el rostro
+                    face_encoding = face_resized.flatten().astype(np.float64)
+                    norm = np.linalg.norm(face_encoding)
+                    if norm == 0:
+                        self.logger.error("Norma del encoding de la cara es cero durante la verificación.")
+                        messagebox.showerror("Error", "Error en el procesamiento de la cara. Por favor, inténtelo de nuevo.")
+                        verification_window.destroy()
+                        cap.release()
+                        return
+                    face_encoding /= norm
+
+                    # Calcular similitud
+                    similarity = cosine_similarity([saved_encoding], [face_encoding])[0][0]
+
+                    # Informar al usuario
+                    if similarity > 0.8:
+                        status_label.config(text="Rostro verificado exitosamente.")
+                        self.logger.info(f"Usuario '{username}' verificado exitosamente. Similaridad: {similarity:.2f}")
+                        messagebox.showinfo("Éxito", f"Bienvenido, {username}!")
+                        self.logged_in = True  # Actualizar estado de inicio de sesión
+                        verification_window.destroy()
+                        window.destroy()
+                        cap.release()
+                        self.open_main_app(username)
+                    else:
+                        status_label.config(text=f"Verificación fallida. Similaridad: {similarity:.2f}")
+                        self.logger.warning(f"Verificación facial fallida para el usuario '{username}'. Similaridad: {similarity:.2f}")
+                        messagebox.showerror("Error", "Verificación facial fallida. Acceso denegado.")
+                        verification_window.destroy()
+                        cap.release()
+                else:
+                    status_label.config(text="No se detectó un rostro. Inténtelo de nuevo.")
+
+                if not self.stop_threads:
+                    verification_window.after(100, update_verification_frame)
+            else:
+                status_label.config(text="Error al acceder a la cámara.")
+                self.logger.error("Error al capturar el frame de la cámara durante la verificación.")
+                verification_window.destroy()
+                cap.release()
+
+        update_verification_frame()
+
+    def open_main_app(self, username):
+        self.username = username  # Guardar el nombre de usuario
+        main_window = tk.Toplevel(self.master)
+        main_window.title("CyberMoodSec by ViajaTech - Dashboard")
+        main_window.geometry("1000x700")
+        main_window.configure(bg='#1e1e2e')
+
+        # Frame Layout
+        top_frame = tk.Frame(main_window, bg='#1e1e2e')
+        top_frame.pack(side=tk.TOP, fill=tk.BOTH, expand=False, padx=10, pady=10)
+
+        self.username_label = ttk.Label(top_frame, text=f"Usuario: {username}", font=("Helvetica", 14))
+        self.username_label.pack(side=tk.LEFT, padx=10)
+
+        self.emotion_label = ttk.Label(top_frame, text="Emoción: Detectando...", font=("Helvetica", 14))
+        self.emotion_label.pack(side=tk.RIGHT, padx=10)
+
+        bottom_frame = tk.Frame(main_window, bg='#1e1e2e')
+        bottom_frame.pack(side=tk.BOTTOM, fill=tk.BOTH, expand=False, padx=10, pady=10)
+
+        # Botones de Encriptar y Desencriptar
+        encrypt_button = ttk.Button(bottom_frame, text="Encriptar Carpeta", command=self.encrypt_folder)
+        encrypt_button.pack(side=tk.LEFT, padx=10)
+
+        decrypt_button = ttk.Button(bottom_frame, text="Desencriptar Carpeta", command=self.decrypt_folder)
+        decrypt_button.pack(side=tk.LEFT, padx=10)
+
+        # Nota de Texto
+        note_frame = tk.Frame(main_window, bg='#1e1e2e')
+        note_frame.pack(fill=tk.BOTH, expand=True, padx=20, pady=10)
+
+        note_label = ttk.Label(note_frame, text="Notas:", font=("Helvetica", 14))
+        note_label.pack(anchor='w')
+
+        self.note_text = tk.Text(note_frame, bg='#313244', fg='#00ffaa', font=("Helvetica", 12))
+        self.note_text.pack(fill=tk.BOTH, expand=True, pady=5)
+
+        save_note_button = ttk.Button(note_frame, text="Guardar Nota", command=self.save_note)
+        save_note_button.pack(pady=5)
+
+        load_notes_button = ttk.Button(note_frame, text="Cargar Notas", command=self.load_notes)
+        load_notes_button.pack(pady=5)
+
+        # Video Display para mostrar la emoción durante la encriptación/desencriptación
+        self.video_label = tk.Label(main_window, bg='#1e1e2e')
+        self.video_label.pack(side=tk.RIGHT, padx=10, pady=10)
+
+    def capture_emotion(self, operation=""):
+        """
+        Captura la emoción facial del usuario para encriptar/desencriptar o guardar nota.
+        Requiere que la misma emoción se detecte consistentemente durante 5 segundos.
+        """
+        emotion_window = tk.Toplevel(self.master)
+        emotion_window.title(f"Captura de Emoción para {operation}")
+        emotion_window.geometry("600x500")
+        emotion_window.configure(bg='#1e1e2e')
+
+        # Etiqueta para mostrar la transmisión de video
+        video_label = tk.Label(emotion_window, bg='#1e1e2e')
+        video_label.pack(padx=10, pady=10)
+
+        # Etiqueta para el estado
+        status_label = ttk.Label(emotion_window, text="Detectando emoción...", font=("Helvetica", 14), foreground='#00ffaa', background='#1e1e2e')
+        status_label.pack(pady=10)
+
+        captured_emotion = {"emotion": None}
+        consistent_count = 0
+        required_consistency = 5  # Número de segundos de consistencia requeridos
+        last_detected_emotion = None
+
+        # Abrir la cámara para captura de emoción
+        cap = self.initialize_camera()
+        if cap is None:
+            emotion_window.destroy()
+            return "Desconocida"
+
+        def update_emotion_frame():
+            nonlocal consistent_count, last_detected_emotion
+            ret, frame = cap.read()
+            if ret:
+                # Convertir el color para tkinter
+                cv2image = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                img = Image.fromarray(cv2image)
+                imgtk = ImageTk.PhotoImage(image=img)
+                video_label.imgtk = imgtk
+                video_label.configure(image=imgtk)
+
+                # Detectar emoción
+                try:
+                    analysis = DeepFace.analyze(frame, actions=['emotion'], enforce_detection=False, detector_backend='mtcnn')
+                    if isinstance(analysis, list):
+                        analysis = analysis[0]
+                    emotion = analysis.get('dominant_emotion', "Desconocida")
+                    emotion_mapping = {
+                        "angry": "enojado",
+                        "disgust": "asco",
+                        "fear": "miedo",
+                        "happy": "feliz",
+                        "sad": "triste",
+                        "surprise": "sorprendido",
+                        "neutral": "neutral"
+                    }
+                    emotion_es = emotion_mapping.get(emotion.lower(), "Desconocida")
+                except Exception as e:
+                    self.logger.error(f"Error en detección de emociones: {e}")
+                    emotion_es = "Desconocida"
+
+                status_label.config(text=f"Emoción Detectada: {emotion_es}")
+
+                if emotion_es != "Desconocida":
+                    if last_detected_emotion == emotion_es:
+                        consistent_count += 1
+                    else:
+                        consistent_count = 1  # Resetear contador si la emoción cambia
+                        last_detected_emotion = emotion_es
+
+                    if consistent_count >= required_consistency:
+                        captured_emotion["emotion"] = emotion_es
+                        # Detener la captura
+                        emotion_window.destroy()
+                        cap.release()
+                        return
+                else:
+                    consistent_count = 0
+                    last_detected_emotion = None
+
+                if not self.stop_threads and captured_emotion["emotion"] is None:
+                    emotion_window.after(1000, update_emotion_frame)  # Actualizar cada segundo
+            else:
+                status_label.config(text="Error al acceder a la cámara.")
+                self.logger.error("Error al capturar el frame de la cámara durante la captura de emoción.")
+                emotion_window.destroy()
+                cap.release()
+
+        update_emotion_frame()
+        self.master.wait_window(emotion_window)
+        return captured_emotion["emotion"]
+
+    def encrypt_folder(self):
+        if not self.logged_in:
+            messagebox.showerror("Error", "Debe iniciar sesión primero.")
+            return
+
+        folder_selected = filedialog.askdirectory()
+        if not folder_selected:
+            return
+
+        # Capturar emoción actual como contraseña
+        emotion = self.capture_emotion(operation="Encriptar Carpeta")
+        if not emotion or emotion == "Desconocida":
+            messagebox.showerror("Error", "No se pudo detectar una emoción válida.")
+            return
+
+        # Derivar clave de encriptación
+        key = derive_key(emotion)
+
+        # Recorrer y encriptar archivos en la carpeta seleccionada
+        success = True
+        for root_dir, dirs, files in os.walk(folder_selected):
+            for file in files:
+                file_path = os.path.join(root_dir, file)
+                # Evitar re-encriptar archivos ya encriptados
+                if file.endswith(".enc"):
+                    continue
+                if not encrypt_file(file_path, key):
+                    success = False
+                    self.logger.error(f"Error al encriptar el archivo: {file_path}")
+
+        if success:
+            messagebox.showinfo("Éxito", f"Carpeta '{folder_selected}' encriptada exitosamente.")
+            self.logger.info(f"Carpeta '{folder_selected}' encriptada exitosamente.")
+        else:
+            messagebox.showerror("Error", "Ocurrió un error durante la encriptación.")
+
+    def decrypt_folder(self):
+        if not self.logged_in:
+            messagebox.showerror("Error", "Debe iniciar sesión primero.")
+            return
+
+        folder_selected = filedialog.askdirectory()
+        if not folder_selected:
+            return
+
+        # Capturar emoción actual como contraseña
+        emotion = self.capture_emotion(operation="Desencriptar Carpeta")
+        if not emotion or emotion == "Desconocida":
+            messagebox.showerror("Error", "No se pudo detectar una emoción válida.")
+            return
+
+        # Derivar clave de desencriptación
+        key = derive_key(emotion)
+
+        # Recorrer y desencriptar archivos en la carpeta seleccionada
+        success = True
+        for root_dir, dirs, files in os.walk(folder_selected):
+            for file in files:
+                file_path = os.path.join(root_dir, file)
+                # Solo desencriptar archivos con extensión .enc
+                if not file.endswith(".enc"):
+                    continue
+                if not decrypt_file(file_path, key):
+                    success = False
+                    self.logger.error(f"Error al desencriptar el archivo: {file_path}")
+
+        if success:
+            messagebox.showinfo("Éxito", f"Carpeta '{folder_selected}' desencriptada exitosamente.")
+            self.logger.info(f"Carpeta '{folder_selected}' desencriptada exitosamente.")
+        else:
+            messagebox.showerror("Error", "Ocurrió un error durante la desencriptación.")
+
+    def save_note(self):
+        if not self.logged_in:
+            messagebox.showerror("Error", "Debe iniciar sesión primero.")
+            return
+
+        # Solicitar título de la nota
+        title = simpledialog.askstring("Guardar Nota", "Ingrese el título de la nota:")
+        if not title:
+            return
+
+        content = self.note_text.get("1.0", tk.END).strip()
+        if not content:
+            messagebox.showerror("Error", "La nota está vacía.")
+            return
+
+        # Capturar emoción actual como contraseña
+        emotion = self.capture_emotion(operation="Guardar Nota")
+        if not emotion or emotion == "Desconocida":
+            messagebox.showerror("Error", "No se pudo detectar una emoción válida.")
+            return
+
+        # Derivar clave de encriptación
+        key = derive_key(emotion)
+
+        # Encriptar el contenido
+        encrypted_content = encrypt_content(content, key)
+        if not encrypted_content:
+            messagebox.showerror("Error", "Ocurrió un error durante la encriptación de la nota.")
+            return
+
+        # Guardar en la base de datos
+        try:
+            with sqlite3.connect('cybermoodsec.db') as conn:
+                cursor = conn.cursor()
+                cursor.execute("INSERT INTO notes (username, title, content) VALUES (?, ?, ?)",
+                               (self.username, title, encrypted_content))
+                conn.commit()
+        except Exception as e:
+            self.logger.error(f"Error al guardar la nota en la base de datos: {e}")
+            messagebox.showerror("Error", "Ocurrió un error al guardar la nota.")
+            return
+
+        self.logger.info(f"Nota '{title}' guardada exitosamente.")
+        messagebox.showinfo("Éxito", f"Nota '{title}' guardada exitosamente.")
+        self.note_text.delete("1.0", tk.END)
+
+    def load_notes(self):
+        if not self.logged_in:
+            messagebox.showerror("Error", "Debe iniciar sesión primero.")
+            return
+
+        # Recuperar notas del usuario
+        try:
+            with sqlite3.connect('cybermoodsec.db') as conn:
+                cursor = conn.cursor()
+                cursor.execute("SELECT id, title, content FROM notes WHERE username=?", (self.username,))
+                notes = cursor.fetchall()
+        except Exception as e:
+            self.logger.error(f"Error al recuperar las notas de la base de datos: {e}")
+            messagebox.showerror("Error", "Ocurrió un error al recuperar las notas.")
+            return
+
+        if not notes:
+            messagebox.showinfo("Información", "No hay notas guardadas.")
+            return
+
+        # Mostrar lista de notas
+        select_window = tk.Toplevel(self.master)
+        select_window.title("Seleccionar Nota")
+        select_window.geometry("400x300")
+        select_window.configure(bg='#1e1e2e')
+
+        listbox = tk.Listbox(select_window, bg='#313244', fg='#00ffaa', font=("Helvetica", 12))
+        listbox.pack(fill=tk.BOTH, expand=True, padx=20, pady=20)
+
+        for note in notes:
+            listbox.insert(tk.END, f"{note[1]} (ID: {note[0]})")
+
+        def view_note():
+            selected = listbox.curselection()
+            if not selected:
+                messagebox.showerror("Error", "Por favor, seleccione una nota.")
+                return
+            index = selected[0]
+            note_id = notes[index][0]
+            title = notes[index][1]
+            encrypted_content = notes[index][2]
+
+            # Capturar emoción actual como contraseña
+            emotion = self.capture_emotion(operation="Ver Nota")
+            if not emotion or emotion == "Desconocida":
+                messagebox.showerror("Error", "No se pudo detectar una emoción válida.")
+                return
+
+            # Derivar clave de desencriptación
+            key = derive_key(emotion)
+
+            # Desencriptar contenido
+            decrypted_content = decrypt_content(encrypted_content, key)
+            if not decrypted_content:
+                messagebox.showerror("Error", "Ocurrió un error durante la desencriptación de la nota.")
+                return
+
+            # Mostrar contenido en una nueva ventana
+            note_window = tk.Toplevel(self.master)
+            note_window.title(f"Nota: {title}")
+            note_window.geometry("600x500")
+            note_window.configure(bg='#1e1e2e')
+
+            note_text = tk.Text(note_window, bg='#313244', fg='#00ffaa', font=("Helvetica", 12))
+            note_text.pack(fill=tk.BOTH, expand=True, padx=20, pady=20)
+            note_text.insert(tk.END, decrypted_content)
+            note_text.config(state='disabled')
+
+        view_button = ttk.Button(select_window, text="Ver Nota", command=view_note)
+        view_button.pack(pady=10)
+
+    def on_closing(self):
+        self.stop_threads = True
+        self.logger.info("Aplicación cerrada por el usuario.")
+        self.master.destroy()
+
+# ============================== Inicialización de la Base de Datos ==============================
+
+def initialize_database():
+    if not os.path.exists('cybermoodsec.db'):
+        conn = sqlite3.connect('cybermoodsec.db')
+        cursor = conn.cursor()
+        # Crear tabla de usuarios
+        cursor.execute('''CREATE TABLE IF NOT EXISTS users (
+                                username TEXT PRIMARY KEY,
+                                emotion_vector BLOB
+                              )''')
+        # Crear tabla de notas
+        cursor.execute('''CREATE TABLE IF NOT EXISTS notes (
+                                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                                username TEXT,
+                                title TEXT,
+                                content BLOB,
+                                FOREIGN KEY(username) REFERENCES users(username)
+                              )''')
+        conn.commit()
+        conn.close()
+
+# ============================== Ejecución de la Aplicación ==============================
+
+if __name__ == "__main__":
+    # Inicializar la base de datos
+    initialize_database()
+
+    root = tk.Tk()
+    app = CyberMoodSecApp(root)
+    root.protocol("WM_DELETE_WINDOW", app.on_closing)
+    root.mainloop()
